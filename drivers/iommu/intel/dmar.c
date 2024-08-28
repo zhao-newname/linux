@@ -914,15 +914,22 @@ dmar_validate_one_drhd(struct acpi_dmar_header *entry, void *arg)
 	return 0;
 }
 
+/*
+ * jeff.zhao iommu 初始化 1.1、detect_intel_iommu
+ * 主要是解析 drhd acpi 表,然后解析是否可用
+ */
+
 void __init detect_intel_iommu(void)
 {
 	int ret;
+	/* 注册drhd 的回调, 用于检测 drhd 的表是否可用 */
 	struct dmar_res_callback validate_drhd_cb = {
 		.cb[ACPI_DMAR_TYPE_HARDWARE_UNIT] = &dmar_validate_one_drhd,
 		.ignore_unhandled = true,
 	};
 
 	down_write(&dmar_global_lock);
+	/* 判断是否有 DMAR 的硬件单元*/
 	ret = dmar_table_detect();
 	if (!ret)
 		ret = dmar_walk_dmar_table((struct acpi_table_dmar *)dmar_tbl,
@@ -936,6 +943,7 @@ void __init detect_intel_iommu(void)
 
 #ifdef CONFIG_X86
 	if (!ret) {
+		/* 注册iommu init 和shutdown 的回调函数, 下面看 init 的函数内容 */
 		x86_init.iommu.iommu_init = intel_iommu_init;
 		x86_platform.iommu_shutdown = intel_iommu_shutdown;
 	}

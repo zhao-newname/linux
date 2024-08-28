@@ -247,6 +247,10 @@ static int remove_iommu_group(struct device *dev, void *data)
  *
  * Return: 0 on success, or an error.
  */
+
+/*
+ * jeff.zhao iommu 初始化 1.2.2、iommu_device_register
+ */
 int iommu_device_register(struct iommu_device *iommu,
 			  const struct iommu_ops *ops, struct device *hwdev)
 {
@@ -264,6 +268,10 @@ int iommu_device_register(struct iommu_device *iommu,
 	list_add_tail(&iommu->list, &iommu_device_list);
 	spin_unlock(&iommu_device_lock);
 
+	/*
+	 * 遍历当前pci bus 总线上面的所有设备
+	 * 并探测设备的 iommu_group,并为所有的 group 申请 domain
+	 */
 	for (int i = 0; i < ARRAY_SIZE(iommu_buses) && !err; i++)
 		err = bus_iommu_probe(iommu_buses[i]);
 	if (err)
@@ -1800,16 +1808,34 @@ static void iommu_group_do_probe_finalize(struct device *dev)
 		ops->probe_finalize(dev);
 }
 
+/*
+ * jeff.zhao iommu 初始化 1.2.2.1、bus_iommu_probe
+ */
 int bus_iommu_probe(const struct bus_type *bus)
 {
 	struct iommu_group *group, *next;
 	LIST_HEAD(group_list);
 	int ret;
 
+	/*
+	 * 1、遍历pci bus 总线所有的 device, 并探测对应的 iommu 或者创建 iommu group;
+	 * 2、为设备初始化对应的 iommu group 并添加到 group_list;
+	 * __iommu_probe_device
+		iommu_init_device ---> intel_iommu_probe_device ---> dev_iommu_priv_set(实例化 struct device_domain_info)
+		iommu_group_alloc_device
+		iommu_create_device_direct_mappings // 在这里应该是不会被调用的
+		__iommu_device_set_domain // 包括这里
+			__iommu_attach_device // attach device 到 iommu 中
+	 */
 	ret = bus_for_each_dev(bus, NULL, &group_list, probe_iommu_group);
 	if (ret)
 		return ret;
 
+	/*
+	 * 1、为 group_list 中所有的 group 分配 domain(identity or DMA ..etc);
+	 * 2、为 group 中的 device 创建 direct mapping(保留的内存iova hpa 1:1);
+	 * 3、attch device 中的 group 到 domain 中;
+	 */
 	list_for_each_entry_safe(group, next, &group_list, entry) {
 		struct group_device *gdev;
 
@@ -2923,6 +2949,9 @@ EXPORT_SYMBOL_GPL(iommu_dev_disable_feature);
  * When target_type is 0 the default domain is selected based on driver and
  * system preferences.
  */
+/**
+ * jeff.zhao iommu 初始化 1.2.2.1.1、iommu_setup_default_domain
+ */
 static int iommu_setup_default_domain(struct iommu_group *group,
 				      int target_type)
 {
@@ -2939,6 +2968,9 @@ static int iommu_setup_default_domain(struct iommu_group *group,
 	if (req_type < 0)
 		return -EINVAL;
 
+	/*
+	 * 1、为 group 分配一个 domain, 可能多个 group 可以公用一个 domain;
+	 */
 	dom = iommu_group_alloc_default_domain(group, req_type);
 	if (IS_ERR(dom))
 		return PTR_ERR(dom);

@@ -2259,33 +2259,39 @@ static int iommu_domain_identity_map(struct dmar_domain *domain,
 
 static int md_domain_init(struct dmar_domain *domain, int guest_width);
 
+/*
+ * jeff.zhao iommu 初始化 1.2.1.1、si_domain_init
+ */
 static int __init si_domain_init(int hw)
 {
 	struct dmar_rmrr_unit *rmrr;
 	struct device *dev;
 	int i, nid, ret;
 
+	/* alloc 全局的 static domain 表(identify) */
 	si_domain = alloc_domain(IOMMU_DOMAIN_IDENTITY);
 	if (!si_domain)
 		return -EFAULT;
 
+	/* 初始化 domain 分配 PGD 的地址 */
 	if (md_domain_init(si_domain, DEFAULT_DOMAIN_ADDRESS_WIDTH)) {
 		domain_exit(si_domain);
 		si_domain = NULL;
 		return -EFAULT;
 	}
 
+	/* 判断 DMAR unit 是否支持硬件 pt, 如果支持就不需要做 identity map 了 */
 	if (hw)
 		return 0;
 
-	for_each_online_node(nid) {
+	for_each_online_node(nid) { // 迭代所有的活动结点(NUMA)
 		unsigned long start_pfn, end_pfn;
 		int i;
 
 		for_each_mem_pfn_range(i, nid, &start_pfn, &end_pfn, NULL) {
 			ret = iommu_domain_identity_map(si_domain,
 					mm_to_dma_pfn_start(start_pfn),
-					mm_to_dma_pfn_end(end_pfn));
+					mm_to_dma_pfn_end(end_pfn)); // IOVA <--> HPA 1:1 映射
 			if (ret)
 				return ret;
 		}
@@ -2614,6 +2620,9 @@ out_unmap:
 	return ret;
 }
 
+/*
+ * jeff.zhao iommu 初始化 1.2.1、init_dmars
+ */
 static int __init init_dmars(void)
 {
 	struct dmar_drhd_unit *drhd;
@@ -2624,8 +2633,16 @@ static int __init init_dmars(void)
 	if (ret)
 		goto free_iommu;
 
+	/*
+	 * 这个 for 循环主要是 loop 所有的 iommu 做如下几件事
+	 *	1、判断是否支持 pasid, 以后再详细了解；
+	 *	2、初始化 queue invalid;
+	 *	3、初始化 iommu_ids;
+	 *	4、为每个 iommu 初始化一个 root_entry;
+	 *	5、检测 DMAR unit 是否支持硬件passthrough;
+	 */
 	for_each_iommu(iommu, drhd) {
-		if (drhd->ignored) {
+		if (drhd->ignored) { // DMAR unit 下面没有设备
 			iommu_disable_translation(iommu);
 			continue;
 		}
@@ -2642,8 +2659,16 @@ static int __init init_dmars(void)
 						   intel_pasid_max_id);
 		}
 
+		/*
+		 * 主要是初始化queue_invalid, 有两种方式, 为什么需要这个呢？
+		 * 主要原因这个是为了提升性能，因为t不同的 domain 切换需要频繁的更新 iommu 页表，
+		 * 如果没有该功能就要频繁的写硬件寄存器，多cpu还存在资源竞争问题，qi 就为了解决上述优点
+			Using Register based invalidation
+			Using Queued invalidation
+		 */
 		intel_iommu_init_qi(iommu);
 
+		/* 初始化 iommu domain id */
 		ret = iommu_init_domains(iommu);
 		if (ret)
 			goto free_iommu;
@@ -2700,6 +2725,10 @@ static int __init init_dmars(void)
 	 * caches. This is required on some Intel X58 chipsets, otherwise the
 	 * flush_context function will loop forever and the boot hangs.
 	 */
+
+	/*
+	 * 为所有的 active iommu 设置 root_entry 到硬件寄存器里面 RTADDR_REG
+	 */
 	for_each_active_iommu(iommu, drhd) {
 		iommu_flush_write_buffer(iommu);
 		iommu_set_root_entry(iommu);
@@ -2710,6 +2739,10 @@ static int __init init_dmars(void)
 
 	check_tylersburg_isoch();
 
+	/*
+	 * 1、分配全局的 si_domain, 并映射 iova 与 hpa 1:1 映射
+	 * 2、RMRRs 区域内存也按照 identity 类型 map
+	 */
 	ret = si_domain_init(hw_pass_through);
 	if (ret)
 		goto free_iommu;
@@ -2747,6 +2780,7 @@ static int __init init_dmars(void)
 				goto free_iommu;
 		}
 #endif
+		/* 设置 DMAR irq, 用于 iommu 的 page fault */
 		ret = dmar_set_interrupt(iommu);
 		if (ret)
 			goto free_iommu;
@@ -3630,6 +3664,10 @@ static __init int tboot_force_iommu(void)
 	return 1;
 }
 
+/*
+ * jeff.zhao iommu 初始化 1.2、intel_iommu_init
+ *
+ */
 int __init intel_iommu_init(void)
 {
 	int ret = -ENODEV;
@@ -3644,12 +3682,27 @@ int __init intel_iommu_init(void)
 		    platform_optin_force_iommu();
 
 	down_write(&dmar_global_lock);
+	/*
+	 * 解析dmar 中不同类型的 remapping structures:
+		struct dmar_res_callback cb = {
+			.print_entry = true,
+			.ignore_unhandled = true,
+			.arg[ACPI_DMAR_TYPE_HARDWARE_UNIT] = &drhd_count,
+			.cb[ACPI_DMAR_TYPE_HARDWARE_UNIT] = &dmar_parse_one_drhd, // 指 iommu 硬件
+			.cb[ACPI_DMAR_TYPE_RESERVED_MEMORY] = &dmar_parse_one_rmrr, // RMRR 为某些设备预留的内存，不mamping, 如 legacy 设备(USB)
+			.cb[ACPI_DMAR_TYPE_ROOT_ATS] = &dmar_parse_one_atsr, // ATS, 是 pcie 的一个 features,后续可以详细了解
+			.cb[ACPI_DMAR_TYPE_HARDWARE_AFFINITY] = &dmar_parse_one_rhsa, // RHSA 指cpu 和 iommu 硬件的亲和性, 保证 iommu 硬件可能会跨 node
+			.cb[ACPI_DMAR_TYPE_NAMESPACE] = &dmar_parse_one_andd, // 暂不介绍
+			.cb[ACPI_DMAR_TYPE_SATC] = &dmar_parse_one_satc, // 暂不介绍
+		};
+	 */
 	if (dmar_table_init()) {
 		if (force_on)
 			panic("tboot: Failed to initialize DMAR table\n");
 		goto out_free_dmar;
 	}
 
+	/* 主要是初始化每个 DMAR unit(iommu 硬件)下挂载的设备 */
 	if (dmar_dev_scope_init() < 0) {
 		if (force_on)
 			panic("tboot: Failed to initialize DMAR device scope\n");
@@ -3701,8 +3754,21 @@ int __init intel_iommu_init(void)
 	if (list_empty(&dmar_satc_units))
 		pr_info("No SATC found\n");
 
+	/*
+	 * 主要是 loop 所有的 DMAR unit 忽略下面没有设备或者 GFX(不会调用 DMA 相关的api 进行的操作) 的图形设备
+	 */
 	init_no_remapping_devices();
 
+	/*
+	 * 为所有的 DMAR unit 中的 iommu 做如下几件事：
+	 *	1、判断是否支持 pasid, 以后再详细了解;
+	 *	2、初始化 queue invalid;
+	 *	3、初始化 iommu_ids;
+	 *	4、为每个 iommu 初始化一个 root_entry;
+	 *	5、检测 DMAR unit 是否支持硬件passthrough;
+	 *	6、创建全局 static domain 并iova 与 hpa 1:1 映射
+	 *	7、初始化 DMAR unit 的 irq， 用于 iommu 的page fault;
+	 */
 	ret = init_dmars();
 	if (ret) {
 		if (force_on)
@@ -3731,12 +3797,17 @@ int __init intel_iommu_init(void)
 		iommu_device_sysfs_add(&iommu->iommu, NULL,
 				       intel_iommu_groups,
 				       "%s", iommu->name);
+		/*
+		 * 1、注册 intel_ops
+		 * 2、为pci bus 总线的设备分配 iommu domain & group, 并设置 domain type(identity or DMA ..etc);
+		 */
 		iommu_device_register(&iommu->iommu, &intel_iommu_ops, NULL);
 
 		iommu_pmu_register(iommu);
 	}
 	up_read(&dmar_global_lock);
 
+	/* 如果是 identify 类型,允许因为 memory hotplug 动态 iommu map/unmap */
 	if (si_domain && !hw_pass_through)
 		register_memory_notifier(&intel_iommu_memory_nb);
 
@@ -3744,7 +3815,9 @@ int __init intel_iommu_init(void)
 	if (probe_acpi_namespace_devices())
 		pr_warn("ACPI name space devices didn't probe correctly\n");
 
-	/* Finally, we enable the DMA remapping hardware. */
+	/* Finally, we enable the DMA remapping hardware. *
+	 * 最后使能 DMA remapping 功能
+	 */
 	for_each_iommu(iommu, drhd) {
 		if (!drhd->ignored && !translation_pre_enabled(iommu))
 			iommu_enable_translation(iommu);

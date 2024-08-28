@@ -85,6 +85,13 @@ int kvm_set_irq(struct kvm *kvm, int irq_source_id, u32 irq, int level,
 
 	while (i--) {
 		int r;
+
+		/*jeff.zhao msix irq
+		 *
+		 * kvm_set_routing_entry---> irq_set.set = kvm_set_msi
+		 *
+		 * kvm_set_msi 主要是将 irq 传送到 vcpu 中, kvm_irq_delivery_to_apic
+		 * */
 		r = irq_set[i].set(&irq_set[i], kvm, irq_source_id, level,
 				   line_status);
 		if (r < 0)

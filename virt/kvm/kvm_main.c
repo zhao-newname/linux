@@ -5247,6 +5247,12 @@ static long kvm_vm_ioctl(struct file *filp,
 		if (copy_from_user(&irq_event, argp, sizeof(irq_event)))
 			goto out;
 
+		/*
+		 * jeff.zhao msix irq
+		 *
+		 * qemu 通过ioctl KVM_IRQ_LINE 让 kvm 向 guest 注入中断
+		 *
+		 * */
 		r = kvm_vm_ioctl_irq_line(kvm, &irq_event,
 					ioctl == KVM_IRQ_LINE_STATUS);
 		if (r)
